@@ -77,9 +77,21 @@ A work unit is **doable** when:
 - inputs and capabilities are available
 - a competent actor could execute the work unit without further planning, in less than 4 hrs (human) or 20 min (AI agent)
 
-Example: My *goal* is to make hot cocoa for my son (to be completed when I hand it to him). I have to *know* where the relevant ingredients are in my kitchen and they must *be there*; I have to be *capable* of operating the relevant kitchen appliances; and I have time to make the cocoa. 
+### Sequencing sibling work units (shallow trees)
 
-It's important to identify work units that are doable by an AI agent. Those can later be queued up for automation, leaving the rest to be tackled by people.
+Projector plans encode dependencies most mechanically by nesting prerequisites as descendants, but deep nesting can be undesirable. In a **shallow** folder (many sibling work units under the same parent), treat the siblings as a small backlog and infer a sensible execution order using:
+
+1. Explicit dependencies in YAML frontmatter (optional): `depends_on: goal-a, goal-b` or `depends_on: none`
+2. Implicit dependencies in the spec text (heuristic): references like “(from `goal-some-prereq`)” in `## Inputs`
+
+When selecting the next work unit to start, prefer siblings whose dependencies are already `execution: complete`, even if they are not descendants in the tree.
+
+A work unit is **doable by an agent** when:
+- it is doable
+- `automatable: yes` is set in `work.md`
+- the goal and validation gates are fully objective/mechanical (e.g. tests pass, files exist, lint passes), or any subjective judgment is explicitly delegated to a human child work unit
+- it requires no missing user decisions during execution (any such decision is split into a child work unit)
+- it can be completed end-to-end by an AI agent with the currently available tools/capabilities in ~20 minutes
 
 ### Key Activities
 
@@ -114,6 +126,8 @@ execution: todo
 actor: unassigned
 # automatable: yes | no (accomplishable by claude code or codex?)
 automatable: no
+# depends_on (optional): single-line scalar; use `none` or comma-separated `goal-*` names
+depends_on: none
 ---
 
 ## Goal
@@ -127,6 +141,13 @@ automatable: no
 
 ## Assumptions (optional)
 ```
+
+### results.md
+
+When `execution: complete`, `results.md` must exist, be non-empty, and include (briefly):
+- **Summary**: what changed / what was produced
+- **Outputs**: file paths, links, or decisions produced
+- **Validation**: how the goal was verified (tests run, checklist, acceptance criteria)
 
 ### situation.md
 
@@ -300,6 +321,153 @@ rg -l --glob 'work.md' '^execution: todo$' "$root" |
     fi
   done
 
+# Suggest next work units among siblings (heuristic dependencies)
+python3 - "$root" <<'PY'
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+import re
+import sys
+
+
+@dataclass(frozen=True)
+class Unit:
+    path: Path
+    name: str
+    parent: Optional[Path]
+    execution: str
+    depends_on: tuple[str, ...]
+    inferred_depends_on: tuple[str, ...]
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def parse_frontmatter(text: str) -> dict[str, str]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    out: dict[str, str] = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        out[key.strip()] = value.strip()
+    return out
+
+
+def parse_depends_on(value: Optional[str]) -> tuple[str, ...]:
+    if not value:
+        return ()
+    if value == "none":
+        return ()
+    return tuple(v.strip() for v in value.split(",") if v.strip())
+
+
+def infer_depends_on(text: str) -> tuple[str, ...]:
+    # Heuristic: "(from goal-...)" or "(from `goal-...`)" anywhere in the spec.
+    found = re.findall(r"from\\s+`?(goal-[a-z0-9-]+)`?", text)
+    # Preserve order + dedupe
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in found:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return tuple(ordered)
+
+
+def parent_work_unit(root: Path, dir_path: Path) -> Optional[Path]:
+    cur = dir_path.resolve()
+    while True:
+        if cur == root:
+            return None
+        cur = cur.parent
+        if (cur / "work.md").exists():
+            return cur
+
+
+def topo_sort(nodes: list[str], edges: dict[str, set[str]]) -> list[str]:
+    indeg = {n: 0 for n in nodes}
+    for src, dsts in edges.items():
+        for dst in dsts:
+            indeg[dst] += 1
+    q = deque([n for n in nodes if indeg[n] == 0])
+    out: list[str] = []
+    while q:
+        n = q.popleft()
+        out.append(n)
+        for dst in sorted(edges.get(n, set())):
+            indeg[dst] -= 1
+            if indeg[dst] == 0:
+                q.append(dst)
+    return out if len(out) == len(nodes) else nodes
+
+
+root = Path(sys.argv[1]).resolve()
+work_units = {p.parent.resolve() for p in root.rglob("work.md")}
+units: dict[Path, Unit] = {}
+
+for d in sorted(work_units):
+    work_md = d / "work.md"
+    text = read_text(work_md)
+    fm = parse_frontmatter(text)
+    name = d.name
+    parent = parent_work_unit(root, d)
+    units[d] = Unit(
+        path=d,
+        name=name,
+        parent=parent,
+        execution=fm.get("execution", ""),
+        depends_on=parse_depends_on(fm.get("depends_on")),
+        inferred_depends_on=infer_depends_on(text),
+    )
+
+children_by_parent: dict[Optional[Path], list[Unit]] = defaultdict(list)
+for unit in units.values():
+    children_by_parent[unit.parent].append(unit)
+
+for parent, children in sorted(children_by_parent.items(), key=lambda kv: str(kv[0] or root)):
+    sibling_names = {c.name for c in children}
+    if len(children) <= 1:
+        continue
+
+    edges: dict[str, set[str]] = defaultdict(set)
+    deps_by_name: dict[str, set[str]] = {}
+
+    for c in children:
+        deps = set(c.depends_on) | set(c.inferred_depends_on)
+        deps = {d for d in deps if d in sibling_names and d != c.name}
+        deps_by_name[c.name] = deps
+        for d in deps:
+            edges[d].add(c.name)
+
+    order = topo_sort(sorted(sibling_names), edges)
+
+    print(f"\n# Parent: {parent if parent else root}")
+    for name in order:
+        u = next(x for x in children if x.name == name)
+        deps = sorted(deps_by_name[name])
+        print(f"- {name}\t{u.execution}\tdeps={','.join(deps) if deps else 'none'}")
+
+    completed = {c.name for c in children if c.execution == "complete"}
+    candidates = []
+    for c in children:
+        if c.execution != "todo":
+            continue
+        missing = sorted(d for d in deps_by_name[c.name] if d not in completed)
+        if not missing:
+            candidates.append(c.name)
+    if candidates:
+        print("Next candidates:")
+        for name in sorted(candidates):
+            print(f"- {name}")
+PY
+
 # Find next unblocked work units for an agent (todo + automatable: yes + no open descendant work units)
 rg -l --glob 'work.md' '^execution: todo$' "$root" |
   while read -r work_md; do
@@ -386,12 +554,13 @@ find "$root" -name work.md -print0 |
 python3 - "$root" <<'PY'
 import os
 import sys
+from typing import Optional
 from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
 work_units = {p.parent.resolve() for p in root.rglob("work.md")}
 
-def parent_work_unit(dir_path: Path) -> Path | None:
+def parent_work_unit(dir_path: Path) -> Optional[Path]:
     cur = dir_path.resolve()
     while True:
         if cur == root:
