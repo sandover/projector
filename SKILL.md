@@ -1,19 +1,27 @@
 ---
-name: projector
-description: System for planning a project by decomposing a large goal into well-specified tasks; and then doing the work. Use when asked to plan a project, update an existing projector plan, or carry out work in a projector plan.
+name: project-planning
+description: >-
+  Plans projects using the Projector methodology: decomposes large goals into well-specified, dependency-ordered tasks. Use when user says "plan this project", "break this down", "create a project plan", "help me plan", or when working with ergo/bd task trackers.
 ---
 
-## When to Use
+## Quick Start
 
-Use this skill when the user asks to:
-- **Create** a project plan for a goal that is too large to tackle in one shot
-- **Inspect** or analyze an existing projector plan
-- **Update** or extend an existing projector plan
-- **Work** on tasks within an existing projector plan
+**First time?** Ensure there is a task CLI such as ergo (first choice) or bd (more popular, also works)
+
+**Create a new plan:**
+1. Ask user for the goal and constraints
+2. Create epics and 3-7 top-level tasks
+3. Decompose only when tasks aren't doable
+
+**Work on an existing plan:**
+1. Get a ready task from ergo or bd
+2. Claim → Do → Attach results → Complete
+
+See methodology below for definitions and edge cases.
 
 ---
 
-# Part 1: Methodology
+# Methodology
 
 The Projector methodology is independent of how tasks are stored. This section defines the conceptual framework.
 
@@ -135,103 +143,6 @@ A task is **doable by an agent** when:
 
 ---
 
-## Formal Core
-
-A projector plan is a structure $(T, E, \text{epic}, D_T, D_E)$ where:
-
-```text
-T                     finite set of tasks
-E                     finite set of epics
-epic: T → E ∪ {⊥}     each task belongs to at most one epic (⊥ = no epic)
-D_T ⊆ T × T           task dependency edges (acyclic)
-D_E ⊆ E × E           epic dependency edges (acyclic)
-```
-
-### Task Attributes
-
-```text
-state: T → {todo, doing, done, error, blocked}
-worker: T → {any, agent, human}
-claim: T → Actors ∪ {⊥}
-results: T → ℘(FilePath)      set of result file references (may be empty)
-spec: T → Spec                 structured specification (goal, inputs, capabilities, constraints, assumptions)
-```
-
-### Derived Predicates
-
-```text
-# Task t's direct task dependencies
-taskDeps(t) = { t' ∈ T | (t, t') ∈ D_T }
-
-# Epic e's direct epic dependencies  
-epicDeps(e) = { e' ∈ E | (e, e') ∈ D_E }
-
-# Tasks in an epic
-tasksIn(e) = { t ∈ T | epic(t) = e }
-
-# Epic completion: all tasks done (empty epic is trivially complete)
-epicComplete(e) ⇔ ∀t ∈ tasksIn(e). state(t) = done
-
-# Task dependency satisfaction
-taskDepsMet(t) ⇔ ∀t' ∈ taskDeps(t). state(t') = done
-
-# Epic dependency satisfaction (for a task's epic)
-epicDepsMet(t) ⇔ epic(t) = ⊥ ∨ ∀e' ∈ epicDeps(epic(t)). epicComplete(e')
-
-# Ready: can be claimed and worked
-ready(t) ⇔ state(t) = todo ∧ claim(t) = ⊥ ∧ taskDepsMet(t) ∧ epicDepsMet(t)
-
-# Blocked: cannot proceed
-blocked(t) ⇔ state(t) = blocked ∨ (state(t) = todo ∧ (¬taskDepsMet(t) ∨ ¬epicDepsMet(t)))
-
-# Doable: ready and fully specified with available inputs/capabilities
-doable(t) ⇔ ready(t) ∧ Specified(spec(t)) ∧ InputsAvail(t) ∧ CapsAvail(t)
-
-# Doable by agent
-doableByAgent(t) ⇔ doable(t) ∧ worker(t) ∈ {any, agent}
-```
-
-### Invariants
-
-```text
-# Acyclicity
-D_T is acyclic (no task depends on itself transitively)
-D_E is acyclic (no epic depends on itself transitively)
-
-# No cross-type dependencies
-D_T ⊆ T × T and D_E ⊆ E × E (tasks depend on tasks; epics depend on epics)
-
-# Claim requirement
-state(t) ∈ {doing, error} ⇒ claim(t) ≠ ⊥
-
-# Claim cleared on terminal states
-state(t) ∈ {todo, done} ⇒ claim(t) = ⊥
-```
-
-### State Transitions
-
-```text
-Claim(t, a)      if ready(t): state(t) := doing; claim(t) := a
-Complete(t)      if state(t) = doing: state(t) := done; claim(t) := ⊥
-Fail(t)          if state(t) = doing: state(t) := error
-Block(t)         if state(t) ∈ {todo, doing}: state(t) := blocked
-Unblock(t)       if state(t) = blocked: state(t) := todo
-Retry(t, a)      if state(t) = error: state(t) := doing; claim(t) := a
-Cancel(t)        if state(t) ∈ {todo, blocked, error}: state(t) := done; claim(t) := ⊥
-Reopen(t)        if state(t) = done: state(t) := todo
-```
-
-### Backend Requirements
-
-A task backend is **sufficient** for Projector if it can represent:
-1. Tasks with state, worker, claim, results, and a body (for spec)
-2. Epics as task containers
-3. Task→task and epic→epic dependencies (acyclic)
-4. Atomic claim operations (safe for parallel agents)
-5. The state transitions above
-
----
-
 ## Operating Model
 
 ### Key Activities
@@ -239,6 +150,10 @@ A task backend is **sufficient** for Projector if it can represent:
 1. **Planning**: Decompose goals into tasks via dialogue with the user
 2. **Execution**: Do the work, attach results
 3. **Upkeep**: Keep the plan consistent as work progresses
+
+### Situation Context
+
+Store project context (Who, What, When, Where, Why) in `situation.md` at project root. Read it when working on any task.
 
 ### Planning Algorithm
 
@@ -279,11 +194,14 @@ To fill in task components, use (in order of preference):
 
 ### Execution Loop
 
-1. Select the next ready, doable task
-2. Claim it (state → `doing`)
-3. Do the work
-4. Attach results
-5. Mark complete (state → `done`)
+```
+□ Select the next ready, doable task
+□ Claim it (state → doing)
+□ Do the work
+□ Attach results
+□ Mark complete (state → done)
+□ Repeat
+```
 
 If execution fails: state → `error`. Retry, reassign, or cancel.
 
@@ -301,57 +219,136 @@ If execution fails: state → `error`. Retry, reassign, or cancel.
 
 ---
 
-# Part 2: Task Backends
+# Task Backends
 
-Projector can use different tools to store and manage tasks. Choose based on what's already in use or personal preference.
+Projector uses a task backend to store and manage tasks. **Use ergo** unless bd is already in use. Run `<tool> --help` or `<tool> quickstart` to learn the CLI.
 
-## Backend A: ergo
+## ergo (preferred)
 
 ergo is a fast, minimal plan tracker with native support for all Projector concepts.
 
-```bash
-ergo --help       # Command reference
-ergo quickstart   # Guided walkthrough
-```
-
 | Projector Concept | ergo Representation |
 |-------------------|---------------------|
-| Task | `ergo new task` |
-| Epic | `ergo new epic` |
-| Task spec | Structured markdown in task `body` |
-| Dependencies | `ergo dep A B` (A depends on B) |
-| State | `state`: `todo`, `doing`, `done`, `blocked`, `error` |
-| Claim | `claimed_by` (atomic via `ergo claim`) |
-| Worker type | `worker`: `any`, `agent`, `human` |
+| Task | task entity |
+| Epic | epic entity |
+| Spec | Structured markdown in task body |
+| Dependencies | First-class (task→task, epic→epic) |
+| State | `todo`, `doing`, `done`, `blocked`, `error` |
+| Claim | `claimed_by` field (atomic) |
+| Worker type | `worker` field: `any`, `agent`, `human` |
 | Results | `result.path` + `result.summary` |
 
-## Backend B: bd (beads)
+Title and body are separate fields. Write clear, action-oriented titles.
+
+## bd (alternative)
 
 bd is a dependency-aware issue tracker. It requires conventions for some Projector concepts.
 
-```bash
-bd --help         # Command reference
-bd quickstart     # Guided walkthrough
-```
-
 | Projector Concept | bd Representation |
 |-------------------|-------------------|
-| Task | `bd create --type task` |
-| Epic | `bd create --type epic` + `--parent` for containment |
-| Task spec | Structured markdown in `--description` |
-| Dependencies | `bd dep add A B` (A depends on B) |
-| State | `--status`: `open`→todo, `in_progress`→doing, `closed`→done |
-| Error state | `--status blocked` + label `error` |
-| Claim | `bd update --claim` (atomic) |
+| Task | Issue |
+| Epic | Issue with `--type epic` + `--parent` for containment |
+| Spec | Structured markdown in description |
+| Dependencies | First-class (A depends on B) |
+| State | `open`→todo, `in_progress`→doing, `closed`→done |
+| Error state | `blocked` status + `error` label |
+| Claim | Atomic claim operation |
 | Worker type | Labels: `worker:any`, `worker:agent`, `worker:human` |
-| Results | Store file paths in `--notes` |
-| Ready work | `bd ready` (built-in) |
+| Results | Store file paths in notes |
 
-**bd conventions:**
-- Use `--status blocked --add-label error` for error state
-- Use `bd close --reason canceled` for canceled tasks
-- Filter agent work: `bd ready --label worker:agent` or `bd ready --label worker:any`
+---
 
-## Situation Context
+# Appendix: Formal Core
 
-Store project context (Who, What, When, Where, Why) in `situation.md` at project root. Read it when working on any task.
+A projector plan is a structure $(T, E, \text{epic}, D_T, D_E)$ where:
+
+```text
+T                     finite set of tasks
+E                     finite set of epics
+epic: T → E ∪ {⊥}     each task belongs to at most one epic (⊥ = no epic)
+D_T ⊆ T × T           task dependency edges (acyclic)
+D_E ⊆ E × E           epic dependency edges (acyclic)
+```
+
+## Task Attributes
+
+```text
+state: T → {todo, doing, done, error, blocked}
+worker: T → {any, agent, human}
+claim: T → Actors ∪ {⊥}
+results: T → ℘(FilePath)      set of result file references (may be empty)
+spec: T → Spec                 structured specification (goal, inputs, capabilities, constraints, assumptions)
+```
+
+## Derived Predicates
+
+```text
+# Task t's direct task dependencies
+taskDeps(t) = { t' ∈ T | (t, t') ∈ D_T }
+
+# Epic e's direct epic dependencies  
+epicDeps(e) = { e' ∈ E | (e, e') ∈ D_E }
+
+# Tasks in an epic
+tasksIn(e) = { t ∈ T | epic(t) = e }
+
+# Epic completion: all tasks done (empty epic is trivially complete)
+epicComplete(e) ⇔ ∀t ∈ tasksIn(e). state(t) = done
+
+# Task dependency satisfaction
+taskDepsMet(t) ⇔ ∀t' ∈ taskDeps(t). state(t') = done
+
+# Epic dependency satisfaction (for a task's epic)
+epicDepsMet(t) ⇔ epic(t) = ⊥ ∨ ∀e' ∈ epicDeps(epic(t)). epicComplete(e')
+
+# Ready: can be claimed and worked
+ready(t) ⇔ state(t) = todo ∧ claim(t) = ⊥ ∧ taskDepsMet(t) ∧ epicDepsMet(t)
+
+# Blocked: cannot proceed
+blocked(t) ⇔ state(t) = blocked ∨ (state(t) = todo ∧ (¬taskDepsMet(t) ∨ ¬epicDepsMet(t)))
+
+# Doable: ready and fully specified with available inputs/capabilities
+doable(t) ⇔ ready(t) ∧ Specified(spec(t)) ∧ InputsAvail(t) ∧ CapsAvail(t)
+
+# Doable by agent
+doableByAgent(t) ⇔ doable(t) ∧ worker(t) ∈ {any, agent}
+```
+
+## Invariants
+
+```text
+# Acyclicity
+D_T is acyclic (no task depends on itself transitively)
+D_E is acyclic (no epic depends on itself transitively)
+
+# No cross-type dependencies
+D_T ⊆ T × T and D_E ⊆ E × E (tasks depend on tasks; epics depend on epics)
+
+# Claim requirement
+state(t) ∈ {doing, error} ⇒ claim(t) ≠ ⊥
+
+# Claim cleared on terminal states
+state(t) ∈ {todo, done} ⇒ claim(t) = ⊥
+```
+
+## State Transitions
+
+```text
+Claim(t, a)      if ready(t): state(t) := doing; claim(t) := a
+Complete(t)      if state(t) = doing: state(t) := done; claim(t) := ⊥
+Fail(t)          if state(t) = doing: state(t) := error
+Block(t)         if state(t) ∈ {todo, doing}: state(t) := blocked
+Unblock(t)       if state(t) = blocked: state(t) := todo
+Retry(t, a)      if state(t) = error: state(t) := doing; claim(t) := a
+Cancel(t)        if state(t) ∈ {todo, blocked, error}: state(t) := done; claim(t) := ⊥
+Reopen(t)        if state(t) = done: state(t) := todo
+```
+
+## Backend Requirements
+
+A task backend is **sufficient** for Projector if it can represent:
+1. Tasks with state, worker, claim, results, and a body (for spec)
+2. Epics as task containers
+3. Task→task and epic→epic dependencies (acyclic)
+4. Atomic claim operations (safe for parallel agents)
+5. The state transitions above
