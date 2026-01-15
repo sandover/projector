@@ -1,0 +1,7 @@
+{
+  "name": "projector",
+  "version": "1.0.0",
+  "description": "Structured project planning skill using the Projector methodology",
+  "author": "Brandon Harvey",
+  "skills": ["."]
+}
